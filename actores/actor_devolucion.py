@@ -1,6 +1,7 @@
-#actores/actor_devolucion.py
+# actores/actor_devolucion.py
 
 import argparse
+import time  # <--- Importante para el sleep de espera
 from comun.zeromq_utils import (
     create_context,
     create_sub_socket,
@@ -31,7 +32,7 @@ def run_actor_devolucion(sede: int):
     """Actor de Devolución:
     - Se suscribe al tópico DEVOLUCION publicado por el GC
     - Por cada mensaje, llama al GA con operacion = "devolucion"
-    - No responde a los PS, solo procesa en segundo plano
+    - Implementa reintento infinito si el GA no responde (espera a que reviva).
     """
     endpoint_pub_gc, endpoint_ga = get_endpoints_for_sede(sede)
 
@@ -53,23 +54,36 @@ def run_actor_devolucion(sede: int):
         payload = evento.get("payload", {}) or {}
 
         if operacion != "devolucion":
-            #Ignorar mensajes raros
+            # Ignorar mensajes raros
             print(f"[ActorDevolucion Sede {sede}] Operación inesperada: {operacion}")
             continue
-        print(f"[ActorPrestamos Sede {sede}] --- Nueva solicitud ---")
+
+        print(f"[ActorDevolucion Sede {sede}] --- Nueva solicitud ---")
         print(f"[ActorDevolucion Sede {sede}] Procesando devolución: {payload}")
+
         solicitud_ga = {
             "operacion": "devolucion",
             "payload": payload,
         }
 
-        try:
-            socket_req_ga.send(encode_message(solicitud_ga))
-            raw_resp = socket_req_ga.recv()
-            resp_ga = decode_message(raw_resp)
-            print(f"[ActorDevolucion Sede {sede}] Respuesta GA: {resp_ga}")
-        except Exception as e:
-            print(f"[ActorDevolucion Sede {sede}] ERROR al comunicarse con GA: {e}")
+        # --- LOGICA DE ESPERA Y REINTENTO (LAZY PIRATE) ---
+        while True:
+            try:
+                socket_req_ga.send(encode_message(solicitud_ga))
+                # Si el GA esta muerto, recv lanzará excepción por timeout
+                raw_resp = socket_req_ga.recv()
+                resp_ga = decode_message(raw_resp)
+                print(f"[ActorDevolucion Sede {sede}] Respuesta GA: {resp_ga}")
+                break  # Éxito, salimos del bucle de reintentos
+
+            except Exception as e:
+                print(f"[ActorDevolucion Sede {sede}] GA no responde o está caído ({e}).")
+                print(f"[ActorDevolucion Sede {sede}] Esperando a que reviva para reintentar...")
+
+                # Cerramos el socket "dañado" y creamos uno nuevo para reconectar limpiamente
+                socket_req_ga.close()
+                time.sleep(2)  # Espera de 2 segundos antes de reintentar
+                socket_req_ga = create_req_socket(context, endpoint_ga)
 
 
 if __name__ == "__main__":

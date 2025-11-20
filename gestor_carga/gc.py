@@ -1,4 +1,4 @@
-#gestor_carga/gc.py
+# gestor_carga/gc.py
 
 import argparse
 from gestor_carga.heartbeat_monitor import HeartbeatMonitor
@@ -45,24 +45,14 @@ def get_endpoints_for_sede(sede: int):
 
 
 def run_gc(sede: int):
-    """Gestor de Carga (GC) de una sede
-    Protocolo de mensaje desde PS → GC:
-    {
-        "operacion": "prestamo" | "devolucion" | "renovacion",
-        "payload": {
-            "libro_codigo": "L0001",
-            "usuario_id": "U0001",
-            "fecha_actual": "YYYY-MM-DD"
-        }
-    }
-    """
+    """Gestor de Carga (GC) de una sede"""
     endpoints = get_endpoints_for_sede(sede)
 
     gc_reqrep_endpoint = endpoints["gc_reqrep"]
     gc_pub_endpoint = endpoints["gc_pub"]
     actor_prestamos_endpoint = endpoints["actor_prestamos"]
 
-    #Monitor
+    # Monitor
     if sede == 1:
         hb_endpoint = GA_SEDE1_HEARTBEAT_ENDPOINT
     else:
@@ -72,23 +62,20 @@ def run_gc(sede: int):
     monitor.start()
 
     print(f"[GC Sede {sede}] Monitor de heartbeat iniciado en {hb_endpoint}")
-    # ---------------------------------------
-
-
     print(f"[GC Sede {sede}] Escuchando PS en {gc_reqrep_endpoint}")
     print(f"[GC Sede {sede}] Publicando eventos en {gc_pub_endpoint}")
     print(f"[GC Sede {sede}] Actor de préstamos en {actor_prestamos_endpoint}")
 
     context = create_context()
-    #Socket (REP) para hablar con PS
+    # Socket (REP) para hablar con PS
     socket_rep_ps = create_rep_socket(context, gc_reqrep_endpoint)
-    #Socket (PUB) para enviar devoluciones/renovaciones a los actores
+    # Socket (PUB) para enviar devoluciones/renovaciones a los actores
     socket_pub = create_pub_socket(context, gc_pub_endpoint)
     # Socket (REQ) para hablar con el Actor de prestamos
     socket_req_actor = create_req_socket(context, actor_prestamos_endpoint)
 
     while True:
-        #Recibir mensaje desde PS
+        # Recibir mensaje desde PS
         raw = socket_rep_ps.recv()
         msg_ps = decode_message(raw)
 
@@ -100,11 +87,11 @@ def run_gc(sede: int):
             try:
                 if not monitor.ga_vivo:
                     usar_backup = True
-                    print("[GC] Usando GA de respaldo para esta solicitud prestamo.")
+                    print("[GC] Detectado GA muerto (Heartbeat). Solicitando backup.")
             except NameError:
-                #Por si no existe monitor asumimos primario
                 usar_backup = False
-            #Prestamo -> llamada síncrona al actor de prestamos
+
+            # Prestamo -> llamada síncrona al actor de prestamos
             msg_actor = {
                 "operacion": "prestamo",
                 "payload": payload,
@@ -115,17 +102,23 @@ def run_gc(sede: int):
                 raw_resp = socket_req_actor.recv()
                 resp_actor = decode_message(raw_resp)
             except Exception as e:
+                print(f"[GC] Error/Timeout con Actor Prestamos: {e}")
+                print("[GC] Reiniciando conexión con Actor...")
+                # LAZY PIRATE: Cerramos y reabrimos socket para limpiar estado ZMQ
+                socket_req_actor.close()
+                socket_req_actor = create_req_socket(context, actor_prestamos_endpoint)
+
                 resp_actor = {
                     "ok": False,
                     "razon": "ERROR_ACTOR_PRESTAMOS",
-                    "mensaje": f"Error al comunicarse con el Actor de Prestamos: {e}",
+                    "mensaje": f"El Actor de Préstamos no responde (posible fallo de GA). Reintente.",
                 }
 
-            #Responder al PS con el resultado real
+            # Responder al PS con el resultado real
             socket_rep_ps.send(encode_message(resp_actor))
 
         elif operacion == "devolucion":
-            #Devolución -> responder al PS
+            # Devolución -> responder al PS
             ack = {
                 "ok": True,
                 "tipo": "devolucion",
@@ -133,7 +126,7 @@ def run_gc(sede: int):
             }
             socket_rep_ps.send(encode_message(ack))
 
-            #Publicar evento para actores
+            # Publicar evento para actores
             evento = {
                 "operacion": "devolucion",
                 "payload": payload,
@@ -144,7 +137,7 @@ def run_gc(sede: int):
             )
 
         elif operacion == "renovacion":
-            #Renovación -> responder al PS
+            # Renovación -> responder al PS
             ack = {
                 "ok": True,
                 "tipo": "renovacion",
@@ -152,7 +145,7 @@ def run_gc(sede: int):
             }
             socket_rep_ps.send(encode_message(ack))
 
-            #Publicar evento para actores
+            # Publicar evento para actores
             evento = {
                 "operacion": "renovacion",
                 "payload": payload,
@@ -163,7 +156,7 @@ def run_gc(sede: int):
             )
 
         else:
-            #Operacion desconocida
+            # Operacion desconocida
             resp = {
                 "ok": False,
                 "razon": "OPERACION_DESCONOCIDA",

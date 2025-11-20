@@ -1,5 +1,6 @@
-#ps/ps.py
+# ps/ps.py
 import argparse
+import time
 from pathlib import Path
 from comun.zeromq_utils import (
     create_context,
@@ -12,8 +13,9 @@ from comun.config import (
     GC_SEDE2_ENDPOINT_REQREP,
 )
 
+
 def get_gc_endpoint_for_sede(sede: int) -> str:
-    """Devuelve el endpoint del Gestor de Carga (GC) a lasede dada"""
+    """Devuelve el endpoint del Gestor de Carga (GC) a la sede dada"""
     if sede == 1:
         return GC_SEDE1_ENDPOINT_REQREP
     elif sede == 2:
@@ -23,15 +25,7 @@ def get_gc_endpoint_for_sede(sede: int) -> str:
 
 
 def parse_line(line: str):
-    """Parse a una linea del archivo de solicitudes
-    Formato:
-        OPERACION;COD_LIBRO;USUARIO;FECHA
-
-    Ejemplos:
-        PRESTAMO;L0001;U0001;2025-11-19
-        DEVOLUCION;L0001;U0001;2025-11-20
-        RENOVACION;L0001;U0001;2025-11-21
-    """
+    """Parsea una línea del archivo de solicitudes"""
     line = line.strip()
     if not line or line.startswith("#"):
         return None  # línea vacía o comentario
@@ -46,7 +40,7 @@ def parse_line(line: str):
         print(f"[PS] Operacion desconocida: {operacion_txt} en línea: {line}")
         return None
 
-    #Mapeo
+    # Mapeo
     if operacion_txt == "PRESTAMO":
         operacion = "prestamo"
     elif operacion_txt == "DEVOLUCION":
@@ -63,9 +57,9 @@ def parse_line(line: str):
 
 def run_ps(sede: int, archivo_solicitudes: Path):
     """PS:
-    - Lee un archivo de texto linea por linea
-    - Por cada linea valida y envia una solicitud al GC de la sede indicada
-    - Muestra la respuesta
+    - Lee un archivo de texto línea por línea
+    - Por cada línea válida envía una solicitud al GC
+    - Implementa 'Lazy Pirate': si hay timeout, reinicia el socket para no estallar.
     """
     if not archivo_solicitudes.exists():
         print(f"[PS] El archivo de solicitudes no existe: {archivo_solicitudes}")
@@ -73,6 +67,7 @@ def run_ps(sede: int, archivo_solicitudes: Path):
     gc_endpoint = get_gc_endpoint_for_sede(sede)
     print(f"[PS Sede {sede}] Usando GC en {gc_endpoint}")
     print(f"[PS Sede {sede}] Leyendo solicitudes de {archivo_solicitudes}")
+
     context = create_context()
     socket_req_gc = create_req_socket(context, gc_endpoint)
 
@@ -80,21 +75,38 @@ def run_ps(sede: int, archivo_solicitudes: Path):
         for linea in f:
             parsed = parse_line(linea)
             if parsed is None:
-                continue  #vacía o invalida
+                continue  # vacía o inválida
 
             operacion, payload = parsed
             msg = {
                 "operacion": operacion,
                 "payload": payload,
             }
-            print(f"[ActorPrestamos Sede {sede}] --- Nueva solicitud ---")
             print(f"[PS] Enviando: {msg}")
-            socket_req_gc.send(encode_message(msg))
-            resp = safe_recv(socket_req_gc)
-            if resp is None:
-                print("[PS] No se recibió respuesta del GC (timeout).")
-            else:
-                print(f"[PS] Respuesta GC: {resp}")
+
+            try:
+                # Intentar enviar
+                socket_req_gc.send(encode_message(msg))
+
+                # Esperar respuesta
+                resp = safe_recv(socket_req_gc)
+
+                if resp is None:
+                    print("[PS] No se recibió respuesta del GC (timeout). Reiniciando conexión...")
+                    # FIX: Cerrar socket dañado y crear uno nuevo para la siguiente iteración
+                    socket_req_gc.close()
+                    socket_req_gc = create_req_socket(context, gc_endpoint)
+                else:
+                    print(f"[PS] Respuesta GC: {resp}")
+
+            except Exception as e:
+                print(f"[PS] Error crítico de socket: {e}")
+                print("[PS] Reiniciando conexión...")
+                socket_req_gc.close()
+                socket_req_gc = create_req_socket(context, gc_endpoint)
+
+            # Pausa entre solicitudes
+            time.sleep(0.5)
 
 
 if __name__ == "__main__":

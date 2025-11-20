@@ -1,6 +1,7 @@
-#actores/actor_renovacion.py
+# actores/actor_renovacion.py
 
 import argparse
+import time  # <--- Importante
 from comun.zeromq_utils import (
     create_context,
     create_sub_socket,
@@ -16,6 +17,7 @@ from comun.config import (
     TOPIC_RENOVACION,
 )
 
+
 def get_endpoints_for_sede(sede: int):
     """Devuelve endpoints del GC (PUB) y del GA segun sede"""
     if sede == 1:
@@ -25,11 +27,12 @@ def get_endpoints_for_sede(sede: int):
     else:
         raise ValueError("La sede debe ser 1 o 2")
 
+
 def run_actor_renovacion(sede: int):
     """Actor de Renovacion:
     - Se suscribe al topico RENOVACION publicado por el GC
     - Por cada mensaje llama al GA con operacion = renovacion
-    - No responde a los PS solo procesa en background
+    - Implementa espera activa si el GA cae.
     """
     endpoint_pub_gc, endpoint_ga = get_endpoints_for_sede(sede)
 
@@ -53,7 +56,8 @@ def run_actor_renovacion(sede: int):
         if operacion != "renovacion":
             print(f"[ActorRenovacion Sede {sede}] Operación inesperada: {operacion}")
             continue
-        print(f"[ActorPrestamos Sede {sede}] --- Nueva solicitud ---")
+
+        print(f"[ActorRenovacion Sede {sede}] --- Nueva solicitud ---")
         print(f"[ActorRenovacion Sede {sede}] Procesando renovación: {payload}")
 
         solicitud_ga = {
@@ -61,13 +65,22 @@ def run_actor_renovacion(sede: int):
             "payload": payload,
         }
 
-        try:
-            socket_req_ga.send(encode_message(solicitud_ga))
-            raw_resp = socket_req_ga.recv()
-            resp_ga = decode_message(raw_resp)
-            print(f"[ActorRenovacion Sede {sede}] Respuesta GA: {resp_ga}")
-        except Exception as e:
-            print(f"[ActorRenovacion Sede {sede}] ERROR al comunicarse con GA: {e}")
+        # --- LOGICA DE ESPERA Y REINTENTO (LAZY PIRATE) ---
+        while True:
+            try:
+                socket_req_ga.send(encode_message(solicitud_ga))
+                raw_resp = socket_req_ga.recv()
+                resp_ga = decode_message(raw_resp)
+                print(f"[ActorRenovacion Sede {sede}] Respuesta GA: {resp_ga}")
+                break  # Éxito
+
+            except Exception as e:
+                print(f"[ActorRenovacion Sede {sede}] GA no responde o está caído ({e}).")
+                print(f"[ActorRenovacion Sede {sede}] Esperando a que reviva para reintentar...")
+
+                socket_req_ga.close()
+                time.sleep(2)
+                socket_req_ga = create_req_socket(context, endpoint_ga)
 
 
 if __name__ == "__main__":
